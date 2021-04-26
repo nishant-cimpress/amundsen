@@ -1,0 +1,36 @@
+// Copyright Contributors to the Amundsen project.
+// SPDX-License-Identifier: Apache-2.0
+
+@import 'variables';
+@import 'typography';
+
+.lineage-page {
+  .header-title-text {
+    @extend %text-headline-w2;
+  }
+
+  .lineage-graph-label {
+    margin-left: 15px;
+    font-weight: 100;
+  }
+
+  .lineage-charts {
+    position: relative;
+  }
+
+  .lineage-charts :nth-child(2),
+  .lineage-charts :nth-child(3) {
+    position: absolute;
+    top: 0;
+    width: 100%;
+  }
+
+  .header-links {
+    .avatar-label {
+      &:focus,
+      &:hover {
+        color: $link-hover-color;
+      }
+    }
+  }
+}

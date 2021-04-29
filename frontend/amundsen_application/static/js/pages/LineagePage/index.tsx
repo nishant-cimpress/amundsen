@@ -76,7 +76,7 @@ export class LineagePage extends React.Component<
 > {
   private key: string;
 
-  state = {};
+  state: any = {};
 
   private treeContainerRef = React.createRef<HTMLDivElement>();
 
@@ -132,7 +132,10 @@ export class LineagePage extends React.Component<
 
   getDownstreamEntities() {
     const { tableLineage } = this.props;
-    const data = { name: this.getTableKey(), children: [] };
+    const data: { name: string; children: any[] } = {
+      name: this.getTableKey(),
+      children: [],
+    };
     Object.keys(tableLineage.downstream_entities).map((key, index) => {
       const item = tableLineage.downstream_entities[key];
       data.children.push({ name: item.name });
@@ -142,7 +145,10 @@ export class LineagePage extends React.Component<
 
   getUpstreamEntities() {
     const { tableLineage } = this.props;
-    const data = { name: this.getTableKey(), children: [] };
+    const data: { name: string; children: any[] } = {
+      name: this.getTableKey(),
+      children: [],
+    };
     Object.keys(tableLineage.upstream_entities).map((key, index) => {
       const item = tableLineage.upstream_entities[key];
       data.children.push({ name: item.name });

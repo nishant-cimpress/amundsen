@@ -6,7 +6,6 @@ import logging
 import re
 from operator import attrgetter
 from random import randint
-from typing import Any, Dict, Generator, List, Optional, Pattern, Tuple, Union
 
 from amundsen_common.models.dashboard import DashboardSummary
 from amundsen_common.models.lineage import Lineage
@@ -27,10 +26,12 @@ from apache_atlas.utils import type_coerce
 from beaker.cache import CacheManager
 from beaker.util import parse_cache_config_options
 from flask import current_app as app
+from typing import Any, Dict, Generator, List, Optional, Pattern, Tuple, Union
 from werkzeug.exceptions import BadRequest
 
 from metadata_service.entity.dashboard_detail import \
     DashboardDetail as DashboardDetailEntity
+from metadata_service.entity.dashboard_query import DashboardQuery
 from metadata_service.entity.description import Description
 from metadata_service.entity.resource_type import ResourceType
 from metadata_service.entity.tag_detail import TagDetail
@@ -460,6 +461,37 @@ class AtlasProxy(BaseProxy):
     def get_users(self) -> List[UserEntity]:
         pass
 
+    def _get_badges(self, entity) -> List[Badge]:
+        result = []
+
+        classifications = entity.get('classifications')
+
+        for classification in classifications or list():
+            result.append(
+                Badge(
+                    badge_name=classification.get('typeName'),
+                    category='default'
+                )
+            )
+
+        return result
+
+    def _get_tags(self, entity) -> List[Tag]:
+        result = []
+
+        meanings = entity.get(self.REL_ATTRS_KEY, dict()).get('meanings')
+
+        for term in meanings or list():
+            if term.get('entityStatus') == Status.ACTIVE and term.get('relationshipStatus') == Status.ACTIVE:
+                result.append(
+                    Tag(
+                        tag_name=term.get("displayText"),
+                        tag_type='default'
+                    )
+                )
+
+        return result
+
     def get_table(self, *, table_uri: str) -> Table:
         """
         Gathers all the information needed for the Table Detail Page.
@@ -479,26 +511,8 @@ class AtlasProxy(BaseProxy):
                 qualified_name=attrs.get(self.QN_KEY)
             )
 
-            badges = []
-            # Using or in case, if the key 'classifications' is there with a None
-            for classification in table_details.get('classifications') or list():
-                badges.append(
-                    Badge(
-                        badge_name=classification.get('typeName'),
-                        category="default"
-                    )
-                )
-
-            tags = []
-            for term in table_details.get(self.REL_ATTRS_KEY).get("meanings") or list():
-                if term.get('entityStatus') == Status.ACTIVE and \
-                        term.get('relationshipStatus') == Status.ACTIVE:
-                    tags.append(
-                        Tag(
-                            tag_name=term.get("displayText"),
-                            tag_type="default"
-                        )
-                    )
+            badges = self._get_badges(table_details)
+            tags = self._get_tags(table_details)
 
             columns = self._serialize_columns(entity=entity)
 
@@ -1182,10 +1196,123 @@ class AtlasProxy(BaseProxy):
 
         return list(result.values())
 
+    def _get_dashboard_queries(self, guids) -> List[DashboardQuery]:
+        result = []
+
+        dashboard_charts = self.client.entity.get_entities_by_guids(guids=guids)
+
+        dashboard_queries = [v for k, v in dashboard_charts.get('referredEntities', dict()).items()
+                             if v.get('typeName') == 'DashboardQuery']
+
+        for query in dashboard_queries:
+            attrs = query[self.ATTRS_KEY]
+
+            name = attrs.get('name', '')
+            query_text = attrs.get('queryText', '')
+            url = attrs.get('url', '')
+
+            dashboard_query = DashboardQuery(name=name, query_text=query_text, url=url)
+
+            result.append(dashboard_query)
+
+        return result
+
+    def _get_tables(self, guids) -> List[PopularTable]:
+        table_entities = self.client.entity.get_entities_by_guids(guids=guids).entities
+
+        return self._serialize_popular_tables(table_entities)
+
+    def _get_dashboard_group(self, guid):
+        entity = self.client.entity.get_entities_by_guids(guids=[guid]).entities[0]
+
+        return entity
+
+    def _render_dashboard(self, entity, referred_entities=dict()) -> (DashboardSummary, DashboardDetailEntity):
+        try:
+            attributes = entity[self.ATTRS_KEY]
+            relationships = entity[self.REL_ATTRS_KEY]
+
+            badges = self._get_badges(entity)
+            tags = self._get_tags(entity)
+
+            group = self._get_dashboard_group(relationships.get('group').get('guid'))[self.ATTRS_KEY]
+
+            _charts = []
+            _executions = []
+
+            for k, v in referred_entities.items():
+                entity_type = v.get('typeName')
+
+                _attributes = v[self.ATTRS_KEY]
+
+                if entity_type == 'DashboardChart':
+                    _charts.append(_attributes)
+                elif entity_type == 'DashboardExecution':
+                    _executions.append(_attributes)
+
+            queries = self._get_dashboard_queries([q.get('guid') for q in relationships.get('charts', [])])
+            tables = self._get_tables(t.get('guid') for t in relationships.get('tables', []))
+
+            executions = sorted(_executions, key=lambda x: x.get('timestamp', 0), reverse=True)
+
+            try:
+                last_execution = executions[0]
+            except IndexError:
+                last_execution = dict(timestamp=0, state='n/a')
+
+            successful_executions = [e for e in executions if e.get('state') == 'succeeded']
+
+            try:
+                last_successful_execution = successful_executions[0]
+            except IndexError:
+                last_successful_execution = dict(timestamp=0)
+
+            readers = self._get_readers(entity)
+
+            summary_spec = dict(
+                uri=attributes.get('qualifiedName', ''),
+                cluster=attributes.get('cluster', ''),
+                group_name=relationships.get('group', dict()).get('displayText', ''),
+                group_url=group.get('url', ''),
+                product=attributes.get('product', ''),
+                name=attributes.get('name', ''),
+                url=attributes.get('url', ''),
+                description=attributes.get('description', ''),
+                last_successful_run_timestamp=last_successful_execution.get('timestamp', 0),
+                chart_names=[c.get('displayText', '') for c in relationships.get('charts', [])],
+            )
+
+            summarized = DashboardSummary(**summary_spec)
+
+            detailed = DashboardDetailEntity(
+                **summary_spec,
+                created_timestamp=attributes.get('createdTimestamp', 0),
+                updated_timestamp=attributes.get('lastModifiedTimestamp', 0),
+                owners=self._get_owners(relationships.get('ownedBy', [])),
+                last_run_timestamp=last_execution.get('timestamp', 0),
+                last_run_state=last_execution.get('state', 'n/a'),
+                query_names=[q.name for q in queries],
+                queries=queries,
+                tables=tables,
+                tags=tags,
+                badges=badges,
+                recent_view_count=attributes.get('popularityScore', 0),
+                frequent_users=readers
+            )
+
+            return summarized, detailed
+        except Exception as e:
+            raise e
+
     def get_dashboard(self,
-                      dashboard_uri: str,
+                      id: str,
                       ) -> DashboardDetailEntity:
-        pass
+
+        _entity = self.client.entity.get_entity_by_attribute(type_name='Dashboard',
+                                                             uniq_attributes=[(self.QN_KEY, id)])
+        _, result = self._render_dashboard(_entity.entity, _entity.get('referredEntities'))
+
+        return result
 
     def get_dashboard_description(self, *,
                                   id: str) -> Description:
@@ -1196,10 +1323,36 @@ class AtlasProxy(BaseProxy):
                                   description: str) -> None:
         pass
 
+    def _get_table_dashboards(self, guids) -> List[DashboardSummary]:
+        result = []
+
+        if guids:
+            entities = self.client.entity.get_entities_by_guids(guids=guids)
+            for dashboard_entity in entities.entities:
+                try:
+                    if dashboard_entity.status == Status.ACTIVE:
+                        summary, _ = self._render_dashboard(dashboard_entity)
+
+                        result.append(summary)
+                except (KeyError, AttributeError) as ex:
+                    LOGGER.exception('Error while accessing table report: {}. {}'
+                                     .format(str(dashboard_entity), str(ex)))
+
+        return result
+
     def get_resources_using_table(self, *,
                                   id: str,
                                   resource_type: ResourceType) -> Dict[str, List[DashboardSummary]]:
-        return {}
+        if resource_type != ResourceType.Dashboard:
+            raise NotImplementedError('{} is not supported'.format(resource_type))
+
+        table = self._get_table_entity(table_uri=id)
+
+        dashboard_guids = [d['guid'] for d in table.entity[self.REL_ATTRS_KEY].get('dashboards', [])]
+
+        result = self._get_table_dashboards(dashboard_guids)
+
+        return {'dashboards': result}
 
     def get_lineage(self, *,
                     id: str, resource_type: ResourceType, direction: str, depth: int) -> Lineage:
